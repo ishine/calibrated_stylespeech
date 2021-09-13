@@ -88,8 +88,8 @@ class StyleSpeechLoss(nn.Module):
             duration_loss,
         )
 
-class CalibrateStyleSpeechLoss(nn.Module):
-    """ StyleSpeech Loss """
+class CalibratedStyleSpeechLoss(nn.Module):
+    """ CalibratedStyleSpeech Loss """
 
     def __init__(self, preprocess_config, model_config):
         super(StyleSpeechLoss, self).__init__()
@@ -101,7 +101,8 @@ class CalibrateStyleSpeechLoss(nn.Module):
         ]
         self.mse_loss = nn.MSELoss()
         self.mae_loss = nn.L1Loss()
-
+        
+        # Contrastive log-ratio upper bound of MI
         self.club = CLUB()
 
     def forward(self, inputs, predictions):

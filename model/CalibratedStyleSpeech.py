@@ -9,11 +9,11 @@ from .modules import MelStyleEncoder, PhonemeEncoder, MelDecoder, VarianceAdapto
 from utils.tools import get_mask_from_lengths
 
 
-class StyleSpeech(nn.Module):
-    """ StyleSpeech """
+class CalibratedStyleSpeech(nn.Module):
+    """ CalibratedStyleSpeech """
 
     def __init__(self, preprocess_config, model_config):
-        super(StyleSpeech, self).__init__()
+        super(CalibratedStyleSpeech, self).__init__()
         self.model_config = model_config
 
         self.mel_style_encoder = MelStyleEncoder(preprocess_config, model_config)
