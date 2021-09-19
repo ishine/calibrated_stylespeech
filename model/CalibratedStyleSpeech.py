@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .modules import MelStyleEncoder, PhonemeEncoder, MelDecoder, VarianceAdaptor
+from .modules import MelContentEncoder, MelStyleEncoder, PhonemeEncoder, MelDecoder, VarianceAdaptor
 from utils.tools import get_mask_from_lengths
+from mi_upperbound import CLUBSample_group
 
 
 class CalibratedStyleSpeech(nn.Module):
@@ -17,9 +18,15 @@ class CalibratedStyleSpeech(nn.Module):
         self.model_config = model_config
 
         self.mel_style_encoder = MelStyleEncoder(preprocess_config, model_config)
+        self.mel_content_encoder = MelContentEncoder(preprocess_config, model_config)
         self.phoneme_encoder = PhonemeEncoder(model_config)
         self.variance_adaptor = VarianceAdaptor(preprocess_config, model_config)
         self.mel_decoder = MelDecoder(model_config)
+        self.cs_mi = CLUBSample_group(
+            model_config["melencoder"]["encoder_hidden"],
+            model_config["melencoder"]["encoder_hidden"],
+            512
+        )
         self.phoneme_linear = nn.Linear(
             model_config["transformer"]["encoder_hidden"],
             model_config["transformer"]["encoder_hidden"],
@@ -63,6 +70,7 @@ class CalibratedStyleSpeech(nn.Module):
         mel_masks = get_mask_from_lengths(mel_lens, max_mel_len)
 
         style_vector = self.mel_style_encoder(mels, mel_masks)
+        conent_vector = self.mel_content_encoder(mels, mel_masks)
 
         output = self.phoneme_encoder(texts, style_vector, src_masks)
         output = self.phoneme_linear(output)

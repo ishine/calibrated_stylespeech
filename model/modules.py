@@ -102,6 +102,62 @@ class MelStyleEncoder(nn.Module):
 
         self.fc_2 = FCBlock(d_melencoder, d_melencoder)
 
+class MelContentEncoder(nn.Module):
+    """ Mel-Style Encoder """
+
+    def __init__(self, preprocess_config, model_config):
+        super(MelStyleEncoder, self).__init__()
+        n_position = model_config["max_seq_len"] + 1
+        n_mel_channels = preprocess_config["preprocessing"]["mel"]["n_mel_channels"]
+        d_melencoder = model_config["melencoder"]["encoder_hidden"]
+        n_spectral_layer = model_config["melencoder"]["spectral_layer"]
+        n_temporal_layer = model_config["melencoder"]["temporal_layer"]
+        n_slf_attn_layer = model_config["melencoder"]["slf_attn_layer"]
+        n_slf_attn_head = model_config["melencoder"]["slf_attn_head"]
+        d_k = d_v = (
+            model_config["melencoder"]["encoder_hidden"]
+            // model_config["melencoder"]["slf_attn_head"]
+        )
+        kernel_size = model_config["melencoder"]["conv_kernel_size"]
+        dropout = model_config["melencoder"]["encoder_dropout"]
+
+        self.max_seq_len = model_config["max_seq_len"]
+        self.d_melencoder = d_melencoder
+
+        self.fc_1 = FCBlock(n_mel_channels, d_melencoder)
+
+        self.spectral_stack = nn.ModuleList(
+            [
+                FCBlock(
+                    d_melencoder, d_melencoder, activation=Mish()
+                )
+                for _ in range(n_spectral_layer)
+            ]
+        )
+
+        self.temporal_stack = nn.ModuleList(
+            [
+                nn.Sequential(
+                    Conv1DBlock(
+                        d_melencoder, 2 * d_melencoder, kernel_size, activation=Mish(), dropout=dropout
+                    ),
+                    nn.GLU(),
+                )
+                for _ in range(n_temporal_layer)
+            ]
+        )
+
+        self.slf_attn_stack = nn.ModuleList(
+            [
+                MultiHeadAttention(
+                    n_slf_attn_head, d_melencoder, d_k, d_v, dropout=dropout, layer_norm=True
+                )
+                for _ in range(n_slf_attn_layer)
+            ]
+        )
+
+        self.fc_2 = FCBlock(d_melencoder, d_melencoder)
+
     def forward(self, mel, mask):
 
         max_len = mel.shape[1]
