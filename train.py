@@ -1,5 +1,6 @@
 import argparse
 import os
+from numpy import average
 
 import torch
 import yaml
@@ -10,13 +11,12 @@ from tqdm import tqdm
 
 from utils.model import get_model, get_vocoder, get_param_num
 from utils.tools import to_device, log, synth_one_sample
-from model import StyleSpeechLoss
+from model import StyleSpeechLoss, CalibratedStyleSpeechLoss
 from dataset import Dataset
 
 from evaluate import evaluate
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def main(args, configs):
     print("Prepare training ...")
@@ -38,10 +38,10 @@ def main(args, configs):
     )
 
     # Prepare model
-    model, optimizer = get_model(args, configs, device, train=True)
+    model, optimizer, cs_mi_net, cs_mi_net_optimizer = get_model(args, configs, device, train=True)
     model = nn.DataParallel(model)
     num_param = get_param_num(model)
-    Loss = StyleSpeechLoss(preprocess_config, model_config).to(device)
+    Loss = CalibratedStyleSpeechLoss(preprocess_config, model_config).to(device)
     print("Number of StyleSpeech Parameters:", num_param)
 
     # Load vocoder
@@ -78,12 +78,25 @@ def main(args, configs):
             for batch in batchs:
                 batch = to_device(batch, device)
 
+                # MI fisrt formward to update the prior distribution 
+                # q_theta(y=style|x=content)
+                # Get detached content and style vectors from current Stylenet
+                style, content = model.get_cs(batch[6:8]) #[bs, mel_len, 80]
+                for i in range(model_config["mi"]["mi_iters"]):
+                    cs_mi_net_optimizer.zero_grad()
+                    lld_cs_mi = -cs_mi_net.loglikeli(content, style)
+                    lld_cs_mi.backward()
+                    cs_mi_net_optimizer.step()
+
                 # Forward
                 output = model(*(batch[2:]))
-
+                # MI second forward to update the joint distribution 
+                # p(x=content, y=style)
+                mi_cs_loss = model_config["mi"]["mi_weight"] * \
+                                cs_mi_net.mi_est(content, style)
                 # Cal Loss
                 losses = Loss(batch, output)
-                total_loss = losses[0]
+                total_loss = losses[0] + mi_cs_loss
 
                 # Backward
                 total_loss = total_loss / grad_acc_step
@@ -153,6 +166,8 @@ def main(args, configs):
                         {
                             "model": model.module.state_dict(),
                             "optimizer": optimizer._optimizer.state_dict(),
+                            "cs_mi_net": cs_mi_net.modules.state_dict(),
+                            "cs_mi_net_optimizer": cs_mi_net_optimizer._optimizer.state_dict()
                         },
                         os.path.join(
                             train_config["path"]["ckpt_path"],
