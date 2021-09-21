@@ -88,7 +88,7 @@ class StyleSpeechLoss(nn.Module):
             duration_loss,
         )
 
-class CalibratedStyleSpeechLoss(nn.Module):
+class   CalibratedStyleSpeechLoss(nn.Module):
     """ CalibratedStyleSpeech Loss """
 
     def __init__(self, preprocess_config, model_config):
@@ -124,6 +124,8 @@ class CalibratedStyleSpeechLoss(nn.Module):
             mel_masks,
             _,
             _,
+            mel_content,
+            phoneme_content
         ) = predictions
         src_masks = ~src_masks
         mel_masks = ~mel_masks
@@ -162,8 +164,17 @@ class CalibratedStyleSpeechLoss(nn.Module):
         energy_loss = self.mse_loss(energy_predictions, energy_targets)
         duration_loss = self.mse_loss(log_duration_predictions, log_duration_targets)
 
+        # Content loss
+        # Compare the content hidden feature extracted from mel vs phomeme
+        # Using to calibrate the style vector
+        content_loss = self.mse_loss(phoneme_content, mel_content)
+
+        # TODO: Voiced and Non-voiced loss
+        # From Talknet2
+
+
         total_loss = (
-            mel_loss + duration_loss + pitch_loss + energy_loss
+            mel_loss + duration_loss + pitch_loss + energy_loss + content_loss
         )
 
         return (

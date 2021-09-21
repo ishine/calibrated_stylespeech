@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 
 import torch
 import torch.nn as nn
@@ -63,10 +64,12 @@ class CalibratedStyleSpeech(nn.Module):
         mel_masks = get_mask_from_lengths(mel_lens, max_mel_len)
 
         style_vector = self.mel_style_encoder(mels, mel_masks)
-        content_vector = self.mel_content_encoder(mels, mel_masks)
+        mel_content = self.mel_content_encoder(mels, mel_masks)
 
         output = self.phoneme_encoder(texts, style_vector, src_masks)
         output = self.phoneme_linear(output)
+
+        phoneme_content = copy.deepcopy(output)
 
         if self.speaker_emb is not None:
             output = output + self.speaker_emb(speakers).unsqueeze(1).expand(
@@ -94,6 +97,7 @@ class CalibratedStyleSpeech(nn.Module):
             d_control,
         )
 
+
         output, mel_masks = self.mel_decoder(output, style_vector, mel_masks)
         output = self.mel_linear(output)
 
@@ -107,6 +111,8 @@ class CalibratedStyleSpeech(nn.Module):
             mel_masks,
             src_lens,
             mel_lens,
+            mel_content,
+            phoneme_content,
         )
 
     def get_cs(self, mels, mel_lens, max_mel_len):
