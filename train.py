@@ -1,51 +1,89 @@
 import argparse
 import os
 from numpy import average
+import json
 
 import torch
 import yaml
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from torch.utils.data import DistributedSampler, DataLoader
+from torch.distributed import init_process_group
+from torch.nn.parallel import DistributedDataParallel
+from torch.cuda import amp
 
 from utils.model import get_model, get_vocoder, get_param_num
 from utils.tools import to_device, log, synth_one_sample
 from model import StyleSpeechLoss, CalibratedStyleSpeechLoss
 from dataset import Dataset
 
+import glob
+from scipy.io.wavfile import write
+from env import AttrDict
+from meldataset import mel_spectrogram, MAX_WAV_VALUE, load_wav, spectral_normalize_torch
+from hifigan import Generator
+
 from evaluate import evaluate
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.benchmark = True
 
-def main(args, configs):
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def train(rank, args, configs, batch_size, num_gpus):
     print("Prepare training ...")
 
     preprocess_config, model_config, train_config = configs
+    if num_gpus > 1:
+        init_process_group(
+            backend=train_config["dist_config"]['dist_backend'],
+            init_method=train_config["dist_config"]['dist_url'],
+            world_size=train_config["dist_config"]['world_size'] * num_gpus,
+            rank=rank,
+        )
+    device = torch.device('cuda:{:d}'.format(rank))
 
     # Get dataset
     dataset = Dataset(
         "train.txt", preprocess_config, train_config, sort=True, drop_last=True
     )
-    batch_size = train_config["optimizer"]["batch_size"]
+    data_sampler = DistributedSampler(dataset) if num_gpus > 1 else None
     group_size = 4  # Set this larger than 1 to enable sorting in Dataset
     assert batch_size * group_size < len(dataset)
     loader = DataLoader(
         dataset,
         batch_size=batch_size * group_size,
         shuffle=True,
+        sampler=data_sampler,
         collate_fn=dataset.collate_fn,
     )
 
     # Prepare model
     model, optimizer, cs_mi_net, cs_mi_net_optimizer = get_model(args, configs, device, train=True)
-    model = nn.DataParallel(model)
+    if num_gpus > 1:
+        model = DistributedDataParallel(model, device_ids=[rank]).to(device)
+    scaler = amp.GradScaler(enabled=args.use_amp)
     num_param = get_param_num(model)
     Loss = CalibratedStyleSpeechLoss(preprocess_config, model_config).to(device)
-    print("Number of StyleSpeech Parameters:", num_param)
+    print("Number of Calibrated Parameters:", num_param)
 
     # Load vocoder
-    vocoder = get_vocoder(model_config, device)
+    print("Loading vocoder: {}".format(args.vocoder))
+    config_file = os.path.join('/data/tuong/Yen/hifi-gan/cp_hifigan/config.json')
+    with open(config_file) as f:
+        data = f.read()
+
+    json_config = json.loads(data)
+    h = AttrDict(json_config)
+    vocoder = Generator(h)
+    state_dict_g = torch.load(args.vocoder, map_location=device)
+    vocoder.load_state_dict(state_dict_g["generator"])
+    vocoder.eval()
+    vocoder.remove_weight_norm()
+    vocoder.to(device)
+    print("Done")
 
     # Init logger
     for p in train_config["path"].values():
@@ -100,7 +138,9 @@ def main(args, configs):
 
                 # Backward
                 total_loss = total_loss / grad_acc_step
-                total_loss.backward()
+
+                # Backward
+                scaler.scale(total_loss).backward()
                 if step % grad_acc_step == 0:
                     # Clipping gradients to avoid gradient explosion
                     nn.utils.clip_grad_norm_(model.parameters(), grad_clip_thresh)
@@ -185,7 +225,9 @@ def main(args, configs):
 
 
 if __name__ == "__main__":
+    assert torch.cuda.is_available(), "CPU training is not allowed."
     parser = argparse.ArgumentParser()
+    parser.add_argument('--use_amp', action='store_true')
     parser.add_argument("--restore_step", type=int, default=0)
     parser.add_argument(
         "-p",
@@ -210,4 +252,19 @@ if __name__ == "__main__":
     train_config = yaml.load(open(args.train_config, "r"), Loader=yaml.FullLoader)
     configs = (preprocess_config, model_config, train_config)
 
-    main(args, configs)
+    num_gpus = torch.cuda.device_count()
+    batch_size = int(train_config["optimizer"]["batch_size"] / num_gpus)
+
+    print("\n==================================== Training Configuration ====================================")
+    print(' ---> Automatic Mixed Precision:', args.use_amp)
+    print(' ---> Number of used GPU:', num_gpus)
+    print(' ---> Batch size per GPU:', batch_size)
+    print(' ---> Batch size in total:', batch_size * num_gpus)
+    print(" ---> Type of Duration Modeling:", "unsupervised" if model_config["duration_modeling"]["learn_alignment"] else "supervised")
+    print("=================================================================================================")
+    print("Prepare training ...")
+
+    if num_gpus > 1:
+        mp.spawn(train, nprocs=num_gpus, args=(args, configs, batch_size, num_gpus))
+    else:
+        train(0, args, configs, batch_size, num_gpus)

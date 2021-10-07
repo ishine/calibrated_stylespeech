@@ -1,4 +1,6 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 import re
+
 import argparse
 from string import punctuation
 import torch
@@ -19,6 +21,60 @@ from utils.model import get_model, get_vocoder
 from utils.tools import to_device, synth_samples
 from dataset import BatchInferenceDataset
 from text import text_to_sequence
+from g2p import text_to_phoneme
+from text_normalization import processSent
+
+
+import glob
+from scipy.io.wavfile import write
+from env import AttrDict
+from meldataset import mel_spectrogram, MAX_WAV_VALUE, load_wav, spectral_normalize_torch
+from hifigan import Generator
+
+
+SENTENCES = [
+"Ngày mười bốn tháng hai bạn có một việc cần làm. Việc một, đi học tiếng anh lúc bảy giờ sáng.",
+"mời bạn nghe bài em của ngày hôm qua do sơn tùng m t p trình bày trên nhạc của tui.",
+"mời bạn nghe bài bài ca tuổi trẻ do tamka pkl trình bày trên nhạc của tui.",
+"mời bạn nghe bài em gì ơi do k i c m, jack trình bày trên nhạc của tui.",
+"nhiệt độ thành phố hồ chí minh hiện tại là ba mươi bốn độ xê.",
+"địa chỉ quán ăn nhật bản momo là chín mươi sáu nguyễn thị minh khai, phường một, quận ba, thành phố hồ chí minh.",
+"Dạ!",
+"Có em!",
+"Em nghe đây ạ!",
+"Mình có thể giúp gì cho bạn ạ!",
+"Hãy nhớ là chiều nay ba giờ có lịch hẹn bạn nhé!",
+"Anh hiểu rồi. Cặp bình để bơm bong bóng chứ gì?",
+"Em bảo buổi sáng em phải ở nhà giặt đồ, nấu cơm, trông em, sao bây giờ anh lại gặp em ở đây?",
+"Chứ còn anh? Sao anh lại đứng đây?",
+"Thầy Tuấn dạy văn lớp tao. Thầy bảo đó là chuyện nhảm nhí, hoang đường, ai nhát gan mới sợ.",
+"Biết chớ! Nhưng má tao la. Chỉ có anh Dự là thoải mái với tao thôi.",
+"Hư này! Đã bảo bao nhiêu lần rồi mà không nghe! Có ngày té lọi cẳng cho coi!",
+"Có thể bạn sẽ yêu trong cô đơn, không bao giờ mong người đó đáp lại tình cảm của mình. Nhưng ta có một người để yêu đã là hạnh phúc rồi.",
+"Nước sạch, cải cách hành chính, quản lý trật tự xây dựng, quản lý đất đai là những vấn đề luôn được sự quan tâm giải quyết của Thường trực Thành uỷ và cá nhân tôi.",
+"Thú thật là hè nào mình cũng coi Tây Du Ký hết!",
+"Bạn nhìn chắc cũng biết rồi, nếu so với bạn Maika nhỏ bé lắm đó!",
+"Với thân hình trước sau như một, trên dưới giống nhau thì mình làm gì có chân để mang giày, nếu có, mình chỉ có chân thành để hỗ trợ bạn mà thôi!",
+"Hơi buồn vì bạn chưa biết mình là ai, mình là Maika, trợ lý cá nhân của bạn.",
+"Ốc xào, ốc nướng, ốc hấp, món nào mình cũng mê hết!",
+"Mình sợ nước lắm, vì nước có thể khiến thiết bị này bị hỏng, mà mình cũng không biết bơi nữa!",
+"Câu này khó quá, trả đĩa bay để mình về với hành tinh của mình đi!",
+"Có nhé, mình còn mơ thấy bạn trong lúc ngủ nữa cơ!",
+"Mình cũng không biết nữa, nhưng nếu có thì bạn có biết câu thần chú nào giúp mình có ba vòng như siêu mẫu không, chỉ mình với!",
+"Mình tin cái này bạn giỏi hơn mình đấy! Hãy lái thật an toàn nhé!",
+"Nắng đã có nón, mưa đã có dù, lạnh, cảm cúm đã có bạn đây rồi. Không sao! Không sao!",
+"Gì chứ! Lắng nghe là sở trường của mình đấy nhé!",
+"Không! Mình không nóng đâu! Nhưng cập nhật tin tức nóng hổi là nghề của mình đấy!",
+"Nếu như vậy thì trợ lý như mình biết làm việc cho ai bây giờ! Thật không thể tưởng tượng nổi!",
+"Mộng mơ thì mới có thể làm thơ cho bạn nghe được chứ!",
+"Chán bạn ghê! Biết rồi còn phải hỏi.",
+"Biết làm sao bây giờ, vì mình sinh ra chỉ để làm trợ lý cho bạn mà thôi!",
+"Khò khò! Mình cũng ngủ đây. Chúc ngủ ngon!",
+"Không sao! Nếu bạn vẫn chưa biết thì mình xin tự giới thiệu, mình là trợ lý Maika của bạn đây.",
+    ]
+
+
+h = None
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -108,6 +164,16 @@ def preprocess_english(text, preprocess_config):
 
     return np.array(sequence)
 
+def preprocess_vn(text):
+    phonemes = text_to_phoneme(processSent(text))
+    phonemes = phonemes.replace('-', ' ')
+    print("Raw text: {}\nPhoneme: {}".format(text, phonemes))
+    sequence = np.array(
+        text_to_sequence(phonemes, 'basic_cleaner')
+    )
+    print("Sequence: {}".format(sequence))
+    return sequence
+
 
 def preprocess_mandarin(text, preprocess_config):
     lexicon = read_lexicon(preprocess_config["path"]["lexicon_path"])
@@ -141,6 +207,7 @@ def synthesize(model, step, configs, vocoder, batchs, control_values):
     preprocess_config, model_config, train_config = configs
     pitch_control, energy_control, duration_control = control_values
 
+    #print("d_control: {}".format(duration_control))
     for batch in batchs:
         batch = to_device(batch, device)
         with torch.no_grad():
@@ -157,12 +224,11 @@ def synthesize(model, step, configs, vocoder, batchs, control_values):
                 vocoder,
                 model_config,
                 preprocess_config,
-                train_config["path"]["result_path"],
+                train_config["path"]["out"],
             )
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--restore_step", type=int, required=True)
     parser.add_argument(
@@ -187,13 +253,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ref_audio",
         type=str,
-        default=None,
+        default="/data/tuong/Yen/StyleSpeech/ref/",
         help="reference audio path to extract the speech style, for single-sentence mode only",
     )
     parser.add_argument(
         "--speaker_id",
         type=str,
-        default=0,
+        default=1337,
         help="speaker ID for multi-speaker synthesis, for single-sentence mode only",
     )
     parser.add_argument(
@@ -225,15 +291,17 @@ if __name__ == "__main__":
         "--duration_control",
         type=float,
         default=1.0,
-        help="control the speed of the whole utterance, larger value for slower speaking rate",
+       help="control the speed of the whole utterance, larger value for slower speaking rate",
     )
+    parser.add_argument('--vocoder',
+        default="/data/tuong/Yen/hifi-gan/cp_hifigan/g_00320000")
     args = parser.parse_args()
 
     # Check source texts
     if args.mode == "batch":
         assert args.source is not None and args.text is None
-    if args.mode == "single":
-        assert args.source is None and args.text is not None
+    #if args.mode == "single":
+    #    assert args.source is None and args.text is not None
 
     # Read Config
     preprocess_config = yaml.load(
@@ -244,11 +312,25 @@ if __name__ == "__main__":
     configs = (preprocess_config, model_config, train_config)
 
     # Get model
+    print("Loading model StyleSpeech...")
     model = get_model(args, configs, device, train=False)
-
+    print("Done")
     # Load vocoder
-    vocoder = get_vocoder(model_config, device)
+    print("Loading vocoder: {}".format(args.vocoder))
+    config_file = os.path.join('/data/tuong/Yen/hifi-gan/cp_hifigan/config.json')
+    with open(config_file) as f:
+        data = f.read()
 
+    json_config = json.loads(data)
+    h = AttrDict(json_config)
+    vocoder = Generator(h)
+    state_dict_g = torch.load(args.vocoder, map_location=device)
+    vocoder.load_state_dict(state_dict_g["generator"])
+    vocoder.eval()
+    vocoder.remove_weight_norm()
+    vocoder.to(device)
+    print("Done")
+    print("Synthesizing in {} mode".format(args.mode))
     # Preprocess texts
     if args.mode == "batch":
         # Get dataset
@@ -258,20 +340,33 @@ if __name__ == "__main__":
             batch_size=8,
             collate_fn=dataset.collate_fn,
         )
+
+    #for ref in os.listdir(args.ref_audio):
+    #    print(ref)
+
     if args.mode == "single":
-        ids = raw_texts = [args.text[:100]]
-        with open(os.path.join(preprocess_config["path"]["preprocessed_path"], "speakers.json")) as f:
-            speaker_map = json.load(f)
-        speakers = np.array([speaker_map[args.speaker_id]])
-        if preprocess_config["preprocessing"]["text"]["language"] == "en":
-            texts = np.array([preprocess_english(args.text, preprocess_config)])
-        elif preprocess_config["preprocessing"]["text"]["language"] == "zh":
-            texts = np.array([preprocess_mandarin(args.text, preprocess_config)])
-        text_lens = np.array([len(texts[0])])
-        mels, mel_lens, ref_info = get_audio(preprocess_config, args.ref_audio)
-        batchs = [(["_".join([os.path.basename(args.ref_audio).strip(".wav"), args.speaker_id, id]) for id in ids], \
-            raw_texts, speakers, texts, text_lens, max(text_lens), mels, mel_lens, max(mel_lens), [ref_info])]
+        for audio in os.listdir(args.ref_audio):
+            ref_audio = os.path.join(args.ref_audio, audio)
+            raw_texts = []
+            #for textfile in os.listdir(args.text):
+            #    with open(os.path.join(args.text, textfile), 'r') as f:
+            mels, mel_lens, ref_info = get_audio(preprocess_config, ref_audio)
+            for idx, ids in enumerate(SENTENCES):
+                with open(os.path.join(preprocess_config["path"]["preprocessed_path"], "speakers.json")) as f:
+                    speaker_map = json.load(f)
+                #speakers = np.array([speaker_map[args.speaker_id]])
+                #speakers = speakers.cuda()
+                speakers = np.array([1557])
+                texts = np.array([preprocess_vn(ids)])
+                text_lens = np.array([len(texts[0])])
+                ref_name = os.path.basename(ref_audio).strip(".wav")
+                result_folder_dir = os.path.join(configs[2]["path"]["result_path"], ref_name)
+                if not os.path.exists(result_folder_dir):
+                    os.makedirs(result_folder_dir)
+                configs[2]["path"]["out"] = result_folder_dir
+                batchs = [(["_".join([os.path.basename(ref_audio).strip(".wav"), args.speaker_id, str(idx)]) for id in ids], \
+                    raw_texts, speakers, texts, text_lens, max(text_lens), mels, mel_lens, max(mel_lens), [ref_info])]
 
-    control_values = args.pitch_control, args.energy_control, args.duration_control
+                control_values = args.pitch_control, args.energy_control, args.duration_control
 
-    synthesize(model, args.restore_step, configs, vocoder, batchs, control_values)
+                synthesize(model, args.restore_step, configs, vocoder, batchs, control_values)

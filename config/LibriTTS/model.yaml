@@ -44,3 +44,7 @@ mi:
   mi_iters: 5
   mi_weight: 0.01
   mi_lr: 3e-4
+
+duration_modeling:
+  learn_alignment: True
+  aligner_temperature: 0.0005

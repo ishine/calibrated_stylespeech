@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .mi_upperbound import (
-    CLUB
+    CLUBSample_group
 )
 
 class StyleSpeechLoss(nn.Module):
@@ -104,7 +104,7 @@ class   CalibratedStyleSpeechLoss(nn.Module):
         self.mae_loss = nn.L1Loss()
         
         # Contrastive log-ratio upper bound of MI
-        self.club = CLUB()
+        self.club = CLUBSample_group()
 
     def forward(self, inputs, predictions):
         (
@@ -186,26 +186,16 @@ class   CalibratedStyleSpeechLoss(nn.Module):
             duration_loss,
         )
 
+# Refactor with source from keonlee9420
 
 class ForwardSumLoss(nn.Module):
     def __init__(self, blank_logprob=-1):
         super().__init__()
         self.log_softmax = nn.LogSoftmax(dim=3)
         self.ctc_loss = nn.CTCLoss(zero_infinity=True)
-        self.blank_prob = blank_logprob
+        self.blank_logprob = blank_logprob
 
     def forward(self, attn_logprob, in_lens, out_lens):
-        """
-        This code is implemented base on 
-        https://github.com/NVIDIA/NeMo/blob/046fad0f8fa72ce67d0f7718a048f3be82526402/nemo/collections/tts/losses/aligner_loss.py#L24
-
-        attn_logprob: [B, S, T, D]
-        in_lens: [B]
-        out_lens: [B]
-
-        @return: forward_sum: loss
-        """
-
         key_lens = in_lens
         query_lens = out_lens
         attn_logprob_padded = F.pad(input=attn_logprob, pad=(1, 0), value=self.blank_logprob)
@@ -227,10 +217,11 @@ class ForwardSumLoss(nn.Module):
         total_loss /= attn_logprob.shape[0]
         return total_loss
 
+
 class BinLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, hard_attention, soft_attention):
-        log_sum = torch.log(soft_attention[hard_attention == 1] + 1e-16).sum()
+        log_sum = torch.log(torch.clamp(soft_attention[hard_attention == 1], min=1e-12)).sum()
         return -log_sum / hard_attention.sum()
